@@ -1,0 +1,14 @@
+# Пользовательский маппинг создаётся плагином при первом экспорте
+wokwi_exporter/mapping.json
+
+__pycache__/
+*.pyc
+*.tmp
+*.bak
+
+# Служебные файлы KiCad
+~*.lck
+*.kicad_prl
+*-backups/
+fp-info-cache
+_autosave-*

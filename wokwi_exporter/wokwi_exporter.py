@@ -18,6 +18,13 @@ Wokwi в корень проекта (рядом с .kicad_pro).
 
 Схема читается с диска, поэтому перед экспортом схему нужно сохранить.
 
+Маппинг деталей хранится в mapping.json рядом с этим файлом. При первом
+запуске он создаётся из DEFAULT_PART_MAP / DEFAULT_BOARD_PINS, дальше
+плагин читает только его — обновление плагина ваши привязки не затрёт.
+
+Если diagram.json уже есть, экспорт сливается с ним (SMART_MERGE): детали и
+провода из KiCad обновляются, а добавленное вручную в Wokwi сохраняется.
+
 Скрипт работает и без KiCad — удобно для отладки маппинга:
     python wokwi_exporter.py путь/к/проекту.kicad_sch
 """
@@ -58,8 +65,17 @@ GRID_STEP_X = 110
 GRID_STEP_Y = 130
 GRID_OFFSET_X = 340          # отступ периферии от платы (Arduino Uno ≈ 275 px в ширину)
 
-PRESERVE_LAYOUT = True       # если diagram.json уже есть — сохранить позиции деталей,
-                             # их атрибуты и трассировку проводов, сделанные в Wokwi
+MAPPING_FILE_NAME = "mapping.json"  # маппинг деталей; лежит рядом с этим .py
+
+SMART_MERGE = True           # diagram.json уже есть — слить с ним, а не перезаписать:
+                             # детали и провода из KiCad обновляются (позиции, атрибуты и
+                             # трассировка из Wokwi остаются), добавленное вручную переносится
+DROP_DELETED_IN_KICAD = True # удалять то, что прошлый экспорт создал из KiCad, а в схеме этого
+                             # больше нет. При False старые провода KiCad остаются в файле и
+                             # могут замкнуть цепи в симуляции (например, после переноса
+                             # светодиода с D13 на D12 он окажется подключён к обоим пинам)
+STATE_FILE_SUFFIX = ".kicad-state.json"  # «.diagram.kicad-state.json» рядом с diagram.json:
+                                         # какие детали и провода создал прошлый экспорт
 
 # Цвета проводов для сигнальных цепей (GND всегда чёрный, питание — красный)
 WIRE_COLORS = ["green", "blue", "orange", "purple", "gold", "cyan",
@@ -67,8 +83,12 @@ WIRE_COLORS = ["green", "blue", "orange", "purple", "gold", "cyan",
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 2. МАППИНГ КОМПОНЕНТОВ KiCad → Wokwi        ← СЮДА ДОБАВЛЯЙТЕ СВОИ ДЕТАЛИ
+# 2. МАППИНГ ПО УМОЛЧАНИЮ KiCad → Wokwi
 # ═══════════════════════════════════════════════════════════════════════════
+#
+# Свои детали добавляйте в mapping.json рядом с плагином, а не сюда: этот
+# словарь только записывается в mapping.json при первом запуске, и при
+# обновлении плагина он будет перезаписан. Формат записей тот же.
 #
 # КЛЮЧ — как найти символ KiCad. Сравнивается без учёта регистра с:
 #     1) полным lib_id            "Device:LED"
@@ -86,13 +106,10 @@ WIRE_COLORS = ["green", "blue", "orange", "purple", "gold", "cyan",
 #                 "IO2" → "2", "GPIO5" → "GP5", "PA0" → "A0"):
 #                 "arduino" | "esp32" | "pico" | "stm32" (правила в PIN_RULES).
 #   "role"      — "mcu" у центрального микроконтроллера.
-#   "hook"      — имя функции из HOOKS (или сама функция): получает компонент
-#                 и возвращает dict атрибутов, например номинал резистора.
+#   "hook"      — имя функции из HOOKS: получает компонент и возвращает dict
+#                 атрибутов, например номинал резистора.
 #
-# None вместо описания — символ сознательно пропускается без предупреждения.
-#
-# Чтобы добавить свою деталь, скопируйте похожую строку и поменяйте ключ
-# на имя ВАШЕГО символа (или его Value), а "pins" — на имена ВАШИХ пинов.
+# None (в JSON — null) вместо описания — символ пропускается без предупреждения.
 
 _LCD1602_PINS = {
     "VSS": "VSS", "GND": "VSS", "VDD": "VDD", "VCC": "VDD",
@@ -104,7 +121,7 @@ _LCD1602_PINS = {
 _LCD1602_PINS.update({"DB%d" % i: "D%d" % i for i in range(8)})
 _LCD1602_PINS.update({"D%d" % i: "D%d" % i for i in range(8)})
 
-PART_MAP = {
+DEFAULT_PART_MAP = {
     # ─── Микроконтроллеры и платы (role = "mcu") ────────────────────────────
     "Arduino_UNO_R3":     {"type": "wokwi-arduino-uno",  "role": "mcu", "pin_style": "arduino"},
     "Arduino_UNO_R2":     {"type": "wokwi-arduino-uno",  "role": "mcu", "pin_style": "arduino"},
@@ -198,13 +215,13 @@ PART_MAP = {
 # 3. ПИНЫ ПЛАТ WOKWI
 # ═══════════════════════════════════════════════════════════════════════════
 # Списки взяты из исходников wokwi-elements / wokwi-boards. Для плат из этого
-# словаря автопереводчик пинов выбирает только существующие имена. Добавьте
-# сюда свою плату, если подключаете её с "pin_style".
+# словаря автопереводчик пинов выбирает только существующие имена. Как и
+# маппинг деталей, при первом запуске попадают в mapping.json ("board_pins").
 
 def _pins(text):
     return frozenset(text.split())
 
-BOARD_PINS = {
+DEFAULT_BOARD_PINS = {
     "wokwi-arduino-uno": _pins(
         "0 1 2 3 4 5 6 7 8 9 10 11 12 13 A0 A1 A2 A3 A4 A5 A4.2 A5.2 "
         "AREF IOREF RESET 3.3V 5V VIN GND.1 GND.2 GND.3"),
@@ -227,12 +244,12 @@ BOARD_PINS = {
         "A0 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A15 B0 B1 B3 B4 B5 B6 B7 B8 B9 "
         "B10 B11 B12 B13 B14 B15 C13 C14 C15 R VBAT 5V.1 3V3.1 3V3.2 GND.1 GND.2 GND.3"),
 }
-BOARD_PINS["board-pi-pico-w"] = BOARD_PINS["wokwi-pi-pico"]
+DEFAULT_BOARD_PINS["board-pi-pico-w"] = DEFAULT_BOARD_PINS["wokwi-pi-pico"]
 
 # Правила перевода имени пина KiCad в кандидаты имён Wokwi: (regex, [шаблоны]).
 # Имя пина режется по "/" ("D0/RX" → "D0", "RX"), каждая часть проверяется
 # правилами (fullmatch, без учёта регистра). Побеждает первый кандидат,
-# который есть в BOARD_PINS для этой платы.
+# который есть в board_pins для этой платы.
 PIN_RULES = {
     "arduino": [
         (r"D(\d+)", [r"\1"]),
@@ -310,11 +327,179 @@ def hook_led_color(comp):
     return {}
 
 
-# Регистрируйте здесь свои функции, чтобы ссылаться на них из PART_MAP по имени
+# Регистрируйте здесь свои функции, чтобы ссылаться на них из mapping.json по имени
 HOOKS = {
     "resistor_value": hook_resistor_value,
     "led_color": hook_led_color,
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 4a. ФАЙЛ mapping.json
+# ═══════════════════════════════════════════════════════════════════════════
+
+_NOT_FOUND = object()
+
+
+class ExportError(Exception):
+    """Понятная пользователю причина остановки экспорта (без traceback)."""
+
+
+class MappingError(ExportError):
+    """mapping.json нельзя прочитать — экспорт останавливается, файл не трогаем."""
+
+
+def _is_pattern(key):
+    return any(ch in key for ch in "*?[")
+
+
+class Mapping:
+    def __init__(self, parts, board_pins, path="", created=False, warnings=None):
+        self.parts = parts                      # ключ → описание | None; порядок важен для шаблонов
+        self.board_pins = {k: frozenset(v) for k, v in board_pins.items()}
+        self.path = path
+        self.created = created
+        self.warnings = warnings or []
+        self._exact = {k.lower(): k for k in parts if not _is_pattern(k)}
+        self._patterns = [(k.lower(), k) for k in parts if _is_pattern(k)]
+
+    def lookup(self, comp):
+        """(ключ, описание) для компонента или (None, _NOT_FOUND)."""
+        keys = [k.lower() for k in (comp.lib_id, comp.part_name, comp.value) if k]
+        for k in keys:
+            if k in self._exact:
+                return self._exact[k], self.parts[self._exact[k]]
+        for pattern, key in self._patterns:
+            if any(fnmatch.fnmatchcase(k, pattern) for k in keys):
+                return key, self.parts[key]
+        return None, _NOT_FOUND
+
+
+def default_mapping():
+    return Mapping(dict(DEFAULT_PART_MAP), DEFAULT_BOARD_PINS, "встроенный маппинг")
+
+
+def mapping_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), MAPPING_FILE_NAME)
+
+
+_MAPPING_SECTIONS = {
+    "Arduino_UNO_R3": "Микроконтроллеры и платы (role: mcu)",
+    "LED": "Светодиоды",
+    "R": "Резисторы и потенциометры (пин 1 потенциометра в KiCad сверху — туда обычно приходит +V)",
+    "SW_Push": "Кнопки и переключатели (у wokwi-pushbutton пары 1.l/1.r и 2.l/2.r замкнуты внутри)",
+    "Buzzer": "Звук, сервопривод, датчики",
+    "*SSD1306*": "Дисплеи (SSD1306 подходит и для Conn_01x04 с Value = SSD1306: пины 1..4 = GND, VCC, SCL, SDA)",
+    "Arduino_Mega*": "Платы по шаблону, если ваш символ называется иначе",
+    "C": "Не нужны в Wokwi: пропускаются молча (шаблоны держите в конце списка)",
+}
+
+
+def _json_entries(d, indent, width=150):
+    """Записи словаря по одной на строку; длинные — с переносами."""
+    pad, lines, items = " " * indent, [], list(d.items())
+    for i, (k, v) in enumerate(items):
+        comma = "," if i < len(items) - 1 else ""
+        one = "%s%s: %s" % (pad, json.dumps(k, ensure_ascii=False), json.dumps(v, ensure_ascii=False))
+        if width is None or len(one) <= width:
+            lines.append(one + comma)
+        else:
+            body = json.dumps(v, ensure_ascii=False, indent=2).replace("\n", "\n" + pad)
+            lines.append("%s%s: %s%s" % (pad, json.dumps(k, ensure_ascii=False), body, comma))
+    return lines
+
+
+def default_mapping_text():
+    """Содержимое mapping.json по умолчанию: с пояснениями и разделами."""
+    readme = [
+        "Маппинг символов KiCad -> детали Wokwi. Плагин читает этот файл при каждом экспорте.",
+        "Чтобы вернуть значения по умолчанию, удалите файл: при следующем экспорте он создастся заново.",
+        "parts: КЛЮЧ — полный lib_id ('Device:LED'), имя символа ('LED') или поле Value; регистр не важен.",
+        "  Шаблоны с * и ? ('Arduino_Mega*') проверяются сверху вниз, после точных ключей.",
+        "  ЗНАЧЕНИЕ — null (пропустить деталь молча) или объект:",
+        "    type      — тип детали Wokwi (обязательно), см. https://docs.wokwi.com/parts",
+        "    attrs     — атрибуты по умолчанию, например {\"color\": \"red\"}",
+        "    pins      — пин KiCad (ИМЯ или НОМЕР) -> пин Wokwi; сначала ищется имя, потом номер",
+        "    pin_style — авто-перевод имён пинов платы: " + " | ".join(PIN_RULES),
+        "    role      — \"mcu\" у центрального микроконтроллера",
+        "    hook      — атрибуты из поля Value: " + " | ".join(HOOKS),
+        "  Ключи, начинающиеся с '_', игнорируются — это комментарии.",
+        "board_pins: имена пинов плат Wokwi; авто-перевод (pin_style) выбирает только существующие.",
+    ]
+    parts, n = {}, 0
+    for key, entry in DEFAULT_PART_MAP.items():
+        if key in _MAPPING_SECTIONS:
+            n += 1
+            parts["_%02d" % n] = "── %s ──" % _MAPPING_SECTIONS[key]
+        parts[key] = entry
+    boards = {k: sorted(v, key=_natural_key) for k, v in DEFAULT_BOARD_PINS.items()}
+    lines = ["{", '  "_readme": [']
+    lines += ["    %s%s" % (json.dumps(s, ensure_ascii=False), "," if i < len(readme) - 1 else "")
+              for i, s in enumerate(readme)]
+    lines += ["  ],", '  "parts": {'] + _json_entries(parts, 4) + ["  },", '  "board_pins": {']
+    lines += _json_entries(boards, 4, width=None) + ["  }", "}"]
+    text = "\n".join(lines) + "\n"
+    json.loads(text)
+    return text
+
+
+def load_mapping(path=None):
+    """Читает mapping.json; если его нет — создаёт из значений по умолчанию."""
+    path = os.path.abspath(path or mapping_path())
+    created, warnings = False, []
+    if not os.path.exists(path):
+        try:
+            _write_text(path, default_mapping_text())
+            created = True
+        except OSError as exc:
+            m = default_mapping()
+            m.warnings.append("Не удалось создать %s (%s) — использован встроенный маппинг" % (path, exc))
+            return m
+    try:
+        with open(path, encoding="utf-8-sig") as f:  # -sig: Блокнот Windows может добавить BOM
+            data = json.load(f)
+    except ValueError as exc:
+        raise MappingError("Ошибка в %s:\n  %s\n\nИсправьте файл или удалите его — тогда при следующем "
+                           "экспорте он создастся заново со значениями по умолчанию." % (path, exc))
+    except OSError as exc:
+        raise MappingError("Не удалось прочитать %s: %s" % (path, exc))
+    if not isinstance(data, dict) or not isinstance(data.get("parts"), dict):
+        raise MappingError('%s: в файле нет объекта "parts"' % path)
+
+    parts = {}
+    for key, entry in data["parts"].items():
+        if key.startswith("_"):
+            continue
+        if entry is None:
+            parts[key] = None
+            continue
+        if not isinstance(entry, dict) or not isinstance(entry.get("type"), str) or not entry["type"].strip():
+            warnings.append('mapping.json: «%s» — нужен объект с полем "type" или null; запись пропущена' % key)
+            continue
+        entry = dict(entry)
+        for field in ("pins", "attrs"):
+            if field in entry and not (isinstance(entry[field], dict)
+                                       and (field != "pins" or all(isinstance(v, str) for v in entry[field].values()))):
+                warnings.append('mapping.json: «%s» — поле "%s" должно быть объектом%s; поле пропущено'
+                                % (key, field, " со строками" if field == "pins" else ""))
+                entry.pop(field)
+        if entry.get("hook") and entry["hook"] not in HOOKS:
+            warnings.append('mapping.json: «%s» — неизвестный hook "%s" (есть: %s)' % (key, entry["hook"], ", ".join(HOOKS)))
+        if entry.get("pin_style") and entry["pin_style"] not in PIN_RULES:
+            warnings.append('mapping.json: «%s» — неизвестный pin_style "%s" (есть: %s)'
+                            % (key, entry["pin_style"], ", ".join(PIN_RULES)))
+        parts[key] = entry
+
+    board_pins = {}
+    raw = data.get("board_pins", {})
+    for key, pins in (raw.items() if isinstance(raw, dict) else ()):
+        if key.startswith("_"):
+            continue
+        if isinstance(pins, list) and all(isinstance(p, str) for p in pins):
+            board_pins[key] = pins
+        else:
+            warnings.append('mapping.json: board_pins «%s» — нужен список строк; пропущено' % key)
+    return Mapping(parts, board_pins, path, created, warnings)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -831,8 +1016,9 @@ class SchematicReader:
         return nets
 
 
-def load_netlist(sch_path, source=None):
+def load_netlist(sch_path, source=None, mapping=None):
     source = (source or NETLIST_SOURCE).lower()
+    mapping = mapping or default_mapping()
     notes = []
     if source in ("auto", "kicad-cli"):
         cli = find_kicad_cli()
@@ -857,7 +1043,7 @@ def load_netlist(sch_path, source=None):
             # kicad-cli не выгружает детали с флагом «Исключить из платы» (on_board no),
             # а внешние модули (дисплей, датчик) часто помечены именно так
             dropped = sorted((ref for ref, c in placed.items() if ref not in nl.components and not c.dnp
-                              and lookup_part(c)[1] not in (None, _NOT_FOUND)), key=_natural_key)
+                              and mapping.lookup(c)[1] not in (None, _NOT_FOUND)), key=_natural_key)
             if not dropped:
                 return nl
             msg = "kicad-cli не выгрузил %s (флаг «Исключить из платы»?)" % ", ".join(dropped)
@@ -878,22 +1064,6 @@ def load_netlist(sch_path, source=None):
 # ═══════════════════════════════════════════════════════════════════════════
 # 9. СБОРКА diagram.json
 # ═══════════════════════════════════════════════════════════════════════════
-
-_NOT_FOUND = object()
-
-
-def lookup_part(comp):
-    """Возвращает (ключ PART_MAP, описание) или (None, _NOT_FOUND)."""
-    keys = [k.lower() for k in (comp.lib_id, comp.part_name, comp.value) if k]
-    exact = {k.lower(): k for k in PART_MAP if not any(ch in k for ch in "*?[")}
-    for k in keys:
-        if k in exact:
-            return exact[k], PART_MAP[exact[k]]
-    for pattern, entry in PART_MAP.items():
-        if any(ch in pattern for ch in "*?[") and any(fnmatch.fnmatchcase(k, pattern.lower()) for k in keys):
-            return pattern, entry
-    return None, _NOT_FOUND
-
 
 def clean_pin_name(name):
     """'~{RESET}' → 'RESET', '~' → ''."""
@@ -916,7 +1086,7 @@ def pin_candidates(name, style):
     return list(dict.fromkeys(out))
 
 
-def resolve_pin(entry, number, name):
+def resolve_pin(entry, number, name, board_pins):
     """Пин KiCad (номер, имя) → имя пина Wokwi или None."""
     explicit = {str(k).upper(): v for k, v in (entry.get("pins") or {}).items()}
     clean = clean_pin_name(name)
@@ -924,7 +1094,7 @@ def resolve_pin(entry, number, name):
         if key and key.upper() in explicit:
             return explicit[key.upper()]
     style = entry.get("pin_style")
-    known = BOARD_PINS.get(entry["type"])
+    known = board_pins.get(entry["type"])
     if not style and known is None:
         return None
     candidates = pin_candidates(clean or number, style)
@@ -965,28 +1135,71 @@ def _wire_color(net_name, endpoints, palette_index):
     return WIRE_COLORS[palette_index % len(WIRE_COLORS)], True
 
 
+def _log(message):
+    """Строка в консоль KiCad (stdout); ошибки вывода экспорт не роняют."""
+    try:
+        print("[Wokwi] " + message, flush=True)
+    except Exception:
+        pass
+
+
 class ExportReport:
     def __init__(self):
         self.output = ""
         self.source = ""
+        self.mapping_path = ""
+        self.mapping_created = False
         self.parts = []
         self.mcus = []
         self.connections = 0
+        self.kicad_parts = 0              # пришло из KiCad
+        self.kicad_connections = 0
+        self.merged = False               # был старый diagram.json
+        self.updated_parts = 0            # детали KiCad, уже бывшие в нём (расположение из Wokwi)
+        self.updated_connections = 0
+        self.kept_parts = []              # перенесены из старого файла: ручные правки Wokwi
+        self.kept_connections = []
+        self.removed_parts = []           # создал прошлый экспорт, а в схеме их больше нет
+        self.removed_connections = []
+        self.dangling = []                # ручные провода к деталям, которых больше нет
         self.unmapped = []
         self.unresolved = []
         self.ignored = []
         self.warnings = []
 
+    def summary_lines(self):
+        """Сводка по деталям и связям — она же уходит в консоль KiCad."""
+        lines = ["Из KiCad: деталей %d, связей %d" % (self.kicad_parts, self.kicad_connections)]
+        if self.merged:
+            lines.append("  из них обновлены в старом diagram.json: деталей %d, связей %d"
+                         % (self.updated_parts, self.updated_connections))
+            lines.append("Бережно перенесено из старого diagram.json: деталей %d, связей %d"
+                         % (len(self.kept_parts), len(self.kept_connections)))
+            if self.removed_parts or self.removed_connections:
+                lines.append("Удалено (больше нет в схеме KiCad): деталей %d, связей %d"
+                             % (len(self.removed_parts), len(self.removed_connections)))
+            if self.dangling:
+                lines.append("Отброшено ручных проводов к удалённым деталям: %d" % len(self.dangling))
+        else:
+            lines.append("Старого diagram.json нет — файл создан с нуля")
+        lines.append("Итого в файле: деталей %d, связей %d" % (len(self.parts), self.connections))
+        return lines
+
     def text(self):
         lines = ["Файл сохранён:", "  " + self.output, "",
                  "Источник связей: " + self.source,
-                 "Деталей: %d, соединений: %d" % (len(self.parts), self.connections)]
+                 "Маппинг: %s%s" % (self.mapping_path, " (создан со значениями по умолчанию)"
+                                    if self.mapping_created else ""), ""]
+        lines += self.summary_lines()
         if self.mcus:
             lines.append("Микроконтроллер: " + ", ".join(self.mcus))
         else:
-            lines.append("⚠ Микроконтроллер не найден: добавьте его символ в PART_MAP с \"role\": \"mcu\"")
+            lines.append("⚠ Микроконтроллер не найден: добавьте его символ в mapping.json с \"role\": \"mcu\"")
         sections = [
-            ("Нет в PART_MAP — пропущены (добавьте при необходимости):", self.unmapped),
+            ("Перенесены из Wokwi (нет в схеме KiCad):", self.kept_parts),
+            ("Удалены — их больше нет в схеме KiCad:", self.removed_parts + self.removed_connections),
+            ("Отброшены ручные провода к несуществующим деталям:", self.dangling),
+            ("Нет в mapping.json — пропущены (добавьте при необходимости):", self.unmapped),
             ("Пины без соответствия в Wokwi — провода к ним не созданы:", self.unresolved),
             ("Предупреждения:", self.warnings),
         ]
@@ -999,11 +1212,13 @@ class ExportReport:
 
 
 class _Part:
-    def __init__(self, comp, key, entry, part):
+    def __init__(self, comp, key, entry, part, base_attrs, hook_attrs):
         self.comp = comp
         self.key = key
         self.entry = entry
         self.part = part
+        self.base_attrs = base_attrs      # attrs из mapping.json
+        self.hook_attrs = hook_attrs      # attrs, вычисленные из поля Value
         self.is_mcu = entry.get("role") == "mcu"
 
 
@@ -1027,13 +1242,113 @@ def _layout(parts):
         p.part["top"] = (i // GRID_COLUMNS) * GRID_STEP_Y
 
 
-def build_diagram(netlist, existing=None):
+def _endpoint_part(endpoint):
+    return endpoint.split(":", 1)[0]
+
+
+def _rename_endpoint(endpoint, renamed):
+    pid, sep, pin = endpoint.partition(":")
+    return renamed.get(pid, pid) + sep + pin
+
+
+def smart_merge(kicad_parts, kicad_connections, existing, state, owner, report):
+    """Сливает свежий экспорт KiCad со старым diagram.json.
+
+    kicad_parts — _Part из KiCad, kicad_connections — их провода [a, b, цвет, трассировка].
+    state — что создал прошлый экспорт: {"parts": [...], "connections": [[a, b], ...]} или None.
+    owner — точка подключения → цепь KiCad (чтобы заметить ручной провод между разными цепями).
+
+    Детали и провода из KiCad обновляются, но расположение, атрибуты и трассировка из Wokwi
+    у них остаются. Всё, чего нет в новом экспорте, переносится как есть — кроме того, что
+    создал прошлый экспорт, а из схемы оно пропало (DROP_DELETED_IN_KICAD).
+    """
+    parts = [p.part for p in kicad_parts]
+    if not existing:
+        return parts, kicad_connections
+    report.merged = True
+    prev_parts = set(state.get("parts", [])) if state else None
+    prev_connections = {frozenset(c[:2]) for c in state.get("connections", [])} if state else None
+    old_parts = existing.get("parts") if isinstance(existing.get("parts"), list) else []
+    old_connections = existing.get("connections") if isinstance(existing.get("connections"), list) else []
+    by_id = {p.part["id"]: p for p in kicad_parts}
+    used_ids = set(by_id) | {p.get("id") for p in old_parts if isinstance(p, dict)}
+    kept_parts, renamed = [], {}
+
+    for old in old_parts:
+        pid = old.get("id") if isinstance(old, dict) else None
+        if not isinstance(pid, str):
+            kept_parts.append(old)  # непонятная запись — не наша, не трогаем
+            continue
+        new = by_id.get(pid)
+        if new is not None:
+            same_type = old.get("type") == new.part["type"]
+            if same_type or prev_parts is None or pid in prev_parts:
+                # Та же деталь: тип и связи задаёт KiCad, расположение — Wokwi
+                for k in ("top", "left", "rotate", "hide"):
+                    if k in old:
+                        new.part[k] = old[k]
+                if same_type and isinstance(old.get("attrs"), dict):
+                    # attrs: значения по умолчанию < правки в Wokwi < то, что следует из Value
+                    new.part["attrs"] = {**new.base_attrs, **old["attrs"], **new.hook_attrs}
+                report.updated_parts += 1
+                continue
+            # Ручная деталь Wokwi, чей id заняла новая деталь из KiCad
+            new_id = _make_id(pid + "_wokwi", used_ids)
+            renamed[pid] = new_id
+            kept_parts.append(dict(old, id=new_id))
+            report.kept_parts.append("%s (%s)" % (new_id, old.get("type", "?")))
+            report.warnings.append("Деталь %s из Wokwi совпала по id с новой деталью из KiCad — "
+                                   "переименована в %s" % (pid, new_id))
+            continue
+        if DROP_DELETED_IN_KICAD and prev_parts is not None and pid in prev_parts:
+            report.removed_parts.append("%s (%s)" % (pid, old.get("type", "?")))
+            continue
+        kept_parts.append(old)
+        report.kept_parts.append("%s (%s)" % (pid, old.get("type", "?")))
+
+    final_ids = set(by_id) | {p.get("id") for p in kept_parts if isinstance(p, dict)}
+    kicad_by_key = {frozenset(c[:2]): c for c in kicad_connections}
+    kept_connections = []
+    for old in old_connections:
+        if not (isinstance(old, list) and len(old) >= 2 and all(isinstance(x, str) for x in old[:2])):
+            kept_connections.append(old)
+            continue
+        new = kicad_by_key.get(frozenset(old[:2]))
+        if new is not None:  # провод из KiCad: цвет и трассировка остаются из Wokwi
+            if len(old) > 2:
+                new[2] = old[2]
+            if len(old) > 3:
+                new[3] = old[3]
+            report.updated_connections += 1
+            continue
+        wire = "%s — %s" % (old[0], old[1])
+        if DROP_DELETED_IN_KICAD and prev_connections is not None and frozenset(old[:2]) in prev_connections:
+            report.removed_connections.append(wire)
+            continue
+        a, b = _rename_endpoint(old[0], renamed), _rename_endpoint(old[1], renamed)
+        if _endpoint_part(a) not in final_ids or _endpoint_part(b) not in final_ids:
+            report.dangling.append(wire)
+            continue
+        if owner.get(a) and owner.get(b) and owner[a] != owner[b]:
+            report.warnings.append("Провод %s из старого diagram.json соединяет разные цепи KiCad «%s» и «%s»"
+                                   % (wire, owner[a], owner[b]))
+        kept_connections.append([a, b] + list(old[2:]))
+        report.kept_connections.append(wire)
+
+    if prev_parts is None and (report.kept_parts or report.kept_connections):
+        report.warnings.append("Нет данных о прошлом экспорте (файл *%s рядом с diagram.json), поэтому "
+                               "перенесено всё, чего нет в схеме. Если среди этого есть устаревшие провода "
+                               "KiCad, удалите их в Wokwi; со следующего экспорта плагин различает их сам."
+                               % STATE_FILE_SUFFIX)
+    return parts + kept_parts, kicad_connections + kept_connections
+
+
+def build_diagram(netlist, mapping, existing=None, state=None):
+    """Возвращает (diagram, report, state): state — что сгенерировал KiCad в этот раз."""
     report = ExportReport()
     report.source = netlist.source
-    report.warnings.extend(netlist.warnings)
-    old_parts = {}
-    if existing and PRESERVE_LAYOUT:
-        old_parts = {p.get("id"): p for p in existing.get("parts", []) if isinstance(p, dict)}
+    report.mapping_path, report.mapping_created = mapping.path, mapping.created
+    report.warnings.extend(mapping.warnings + netlist.warnings)
 
     parts, used_ids = {}, set()
     for ref in sorted(netlist.components, key=_natural_key):
@@ -1043,41 +1358,28 @@ def build_diagram(netlist, existing=None):
         if comp.dnp:
             report.ignored.append("%s (DNP)" % ref)
             continue
-        key, entry = lookup_part(comp)
+        key, entry = mapping.lookup(comp)
         if entry is _NOT_FOUND:
             report.unmapped.append("%s — %s, Value «%s»" % (ref, comp.lib_id or "?", comp.value))
             continue
         if entry is None:
             report.ignored.append(ref)
             continue
-        if not entry.get("type"):
-            report.warnings.append("PART_MAP['%s']: не указан \"type\"" % key)
-            continue
         if ref.endswith("?"):
             report.warnings.append("%s: схема не аннотирована — обозначения могут совпасть" % ref)
         pid = _make_id(ref, used_ids)
-        attrs = dict(entry.get("attrs") or {})
-        old = old_parts.get(pid)
-        if old and old.get("type") == entry["type"]:
-            attrs.update(old.get("attrs") or {})  # атрибуты, изменённые в Wokwi
+        base_attrs, hook_attrs = dict(entry.get("attrs") or {}), {}
         hook = entry.get("hook")
-        hook_fn = hook if callable(hook) else HOOKS.get(hook)
-        if hook_fn:
+        if hook in HOOKS:
             try:
-                attrs.update(hook_fn(comp) or {})  # то, что следует из Value, главнее
+                hook_attrs = dict(HOOKS[hook](comp) or {})
             except Exception as exc:
                 report.warnings.append("%s: ошибка hook '%s': %s" % (ref, hook, exc))
-        part = {"type": entry["type"], "id": pid, "top": 0, "left": 0, "attrs": attrs}
-        parts[ref] = _Part(comp, key, entry, part)
+        part = {"type": entry["type"], "id": pid, "top": 0, "left": 0, "attrs": {**base_attrs, **hook_attrs}}
+        parts[ref] = _Part(comp, key, entry, part, base_attrs, hook_attrs)
 
     ordered = sorted(parts.values(), key=lambda p: (not p.is_mcu, _natural_key(p.comp.ref)))
     _layout(ordered)
-    for p in ordered:
-        old = old_parts.get(p.part["id"])
-        if old and old.get("type") == p.part["type"]:
-            for k in ("top", "left", "rotate", "hide"):
-                if k in old:
-                    p.part[k] = old[k]
 
     connections, owner, palette_index = [], {}, 0
     for net_name, nodes in netlist.nets:
@@ -1087,7 +1389,7 @@ def build_diagram(netlist, existing=None):
             if p is None:
                 continue
             pin_name = p.comp.pins.get(number, "")
-            wpin = resolve_pin(p.entry, number, pin_name)
+            wpin = resolve_pin(p.entry, number, pin_name, mapping.board_pins)
             if not wpin:
                 unresolved.append("%s пин %s%s (%s)" % (
                     ref, number, " «%s»" % pin_name if clean_pin_name(pin_name) else "", p.part["type"]))
@@ -1112,35 +1414,30 @@ def build_diagram(netlist, existing=None):
         anchor = anchor or endpoints[0]
         connections.extend([anchor, e, color, []] for e in endpoints if e != anchor)
 
-    if existing and PRESERVE_LAYOUT:
-        old_wires = {frozenset(c[:2]): c for c in existing.get("connections", [])
-                     if isinstance(c, list) and len(c) >= 2 and all(isinstance(x, str) for x in c[:2])}
-        for c in connections:  # цвет и трассировка провода, нарисованные в Wokwi
-            old = old_wires.get(frozenset(c[:2]))
-            if old and len(old) > 2:
-                c[2] = old[2]
-            if old and len(old) > 3:
-                c[3] = old[3]
+    new_state = {"version": 1, "parts": [p.part["id"] for p in ordered],
+                 "connections": [list(c[:2]) for c in connections]}
+    report.kicad_parts, report.kicad_connections = len(ordered), len(connections)
+    final_parts, final_connections = smart_merge(ordered, connections, existing, state, owner, report)
 
     diagram = {
         "version": 1,
         "author": "KiCad → Wokwi exporter",
         "editor": "wokwi",
-        "parts": [p.part for p in ordered],
-        "connections": connections,
+        "parts": final_parts,
+        "connections": final_connections,
         "dependencies": {},
     }
-    if existing and PRESERVE_LAYOUT:
+    if existing:
         for k, v in existing.items():  # serialMonitor, dependencies, author …
             if k not in ("version", "editor", "parts", "connections"):
                 diagram[k] = v
 
-    report.parts = [p.part["id"] for p in ordered]
+    report.parts = final_parts
     report.mcus = ["%s → %s" % (p.comp.ref, p.part["type"]) for p in ordered if p.is_mcu]
-    report.connections = len(connections)
+    report.connections = len(final_connections)
     if len(report.mcus) > 1:
         report.warnings.append("Найдено несколько микроконтроллеров — Wokwi симулирует один основной")
-    return diagram, report
+    return diagram, report, new_state
 
 
 def format_diagram(diagram):
@@ -1161,13 +1458,52 @@ def format_diagram(diagram):
     return "{\n" + "\n".join(lines) + "\n}\n"
 
 
+def _write_text(path, text):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
 def _load_existing(path):
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else None
-    except (OSError, ValueError):
+    """Старый diagram.json или None. Повреждённый файл не перезаписываем: в нём могут быть правки из Wokwi."""
+    if not os.path.exists(path):
         return None
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except ValueError as exc:
+        raise ExportError("%s повреждён:\n  %s\n\nФайл не перезаписан, чтобы не потерять правки из Wokwi. "
+                          "Исправьте его или удалите." % (path, exc))
+    if not isinstance(data, dict):
+        raise ExportError("%s: ожидался JSON-объект — файл не перезаписан" % path)
+    return data
+
+
+def state_path(out_path):
+    folder, base = os.path.split(out_path)
+    return os.path.join(folder, "." + os.path.splitext(base)[0] + STATE_FILE_SUFFIX)
+
+
+def _load_state(path, warnings):
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            state = json.load(f)
+        if isinstance(state.get("parts"), list) and isinstance(state.get("connections"), list):
+            state["connections"] = [c for c in state["connections"] if isinstance(c, list) and len(c) >= 2]
+            return state
+    except (OSError, ValueError, AttributeError):
+        pass
+    warnings.append("%s повреждён — перенесено всё, чего нет в схеме" % path)
+    return None
+
+
+def _format_state(state):
+    rows = ",\n".join("    " + json.dumps(c, ensure_ascii=False) for c in state["connections"])
+    return ('{\n  "version": %d,\n  "parts": %s,\n  "connections": [\n%s\n  ]\n}\n'
+            % (state["version"], json.dumps(state["parts"], ensure_ascii=False), rows))
 
 
 def write_diagram(diagram, path):
@@ -1175,10 +1511,7 @@ def write_diagram(diagram, path):
     json.loads(text)  # на всякий случай: файл обязан быть валидным JSON
     if os.path.exists(path):
         shutil.copy2(path, path + ".bak")
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    _write_text(path, text)
 
 
 def find_root_schematic(path):
@@ -1204,13 +1537,23 @@ def find_root_schematic(path):
     return os.path.join(folder, schematics[0]) if len(schematics) == 1 else None
 
 
-def export_project(sch_path, out_path=None, source=None):
+def export_project(sch_path, out_path=None, source=None, mapping_file=None):
     sch_path = os.path.abspath(sch_path)
-    out_path = out_path or os.path.join(os.path.dirname(sch_path), OUTPUT_FILE_NAME)
-    netlist = load_netlist(sch_path, source)
-    diagram, report = build_diagram(netlist, _load_existing(out_path))
+    out_path = os.path.abspath(out_path or os.path.join(os.path.dirname(sch_path), OUTPUT_FILE_NAME))
+    mapping = load_mapping(mapping_file)
+    _log("Маппинг: %s%s" % (mapping.path, " (создан со значениями по умолчанию)" if mapping.created else ""))
+    netlist = load_netlist(sch_path, source, mapping)
+    existing = _load_existing(out_path) if SMART_MERGE else None
+    st_path, state_warnings = state_path(out_path), []
+    state = _load_state(st_path, state_warnings) if existing else None
+    diagram, report, new_state = build_diagram(netlist, mapping, existing, state)
+    report.warnings.extend(state_warnings)
     write_diagram(diagram, out_path)
+    _write_text(st_path, _format_state(new_state))
     report.output = out_path
+    for line in report.summary_lines():
+        _log(line)
+    _log("Сохранено: " + out_path)
     return diagram, report
 
 
@@ -1265,7 +1608,11 @@ if pcbnew is not None:
                         return
                 _, report = export_project(sch)
                 _show_message(report.text(), "Wokwi exporter")
+            except ExportError as exc:
+                _log("Экспорт остановлен: %s" % exc)
+                _show_message("Экспорт остановлен:\n\n%s" % exc, "Wokwi exporter", error=True)
             except Exception:
+                _log(traceback.format_exc())
                 _show_message("Экспорт не удался:\n\n" + traceback.format_exc(), "Wokwi exporter", error=True)
 
 
@@ -1284,12 +1631,18 @@ def main(argv=None):
     ap.add_argument("-o", "--output", help="куда сохранить (по умолчанию diagram.json в папке проекта)")
     ap.add_argument("--source", choices=["auto", "kicad-cli", "schematic"], default=NETLIST_SOURCE)
     ap.add_argument("--layout", choices=["grid", "schematic"], default=LAYOUT)
+    ap.add_argument("--mapping", help="путь к mapping.json (по умолчанию рядом с этим скриптом)")
     args = ap.parse_args(argv)
     LAYOUT = args.layout
     sch = find_root_schematic(args.path)
     if not sch:
         ap.error("не найдена корневая схема для %s" % args.path)
-    _, report = export_project(sch, args.output, args.source)
+    try:
+        _, report = export_project(sch, args.output, args.source, args.mapping)
+    except ExportError as exc:
+        print("Экспорт остановлен: %s" % exc)
+        return 1
+    print()
     print(report.text())
     return 0
 
