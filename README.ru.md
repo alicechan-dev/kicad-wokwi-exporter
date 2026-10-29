@@ -159,6 +159,30 @@ STM32F103C8 (как Blue Pill), светодиоды (включая RGB), ре�
 Опции: `--source auto|kicad-cli|schematic`, `--layout grid|schematic`, `-o путь\diagram.json`,
 `--mapping путь\mapping.json` (по умолчанию — рядом со скриптом), `--reset-layout`.
 
+## Инструмент: каталог деталей Wokwi
+
+`tools/update_wokwi_catalog.py` собирает `wokwi_catalog.json` — отсортированный список типов деталей
+из публичных репозиториев Wokwi:
+
+* `wokwi/wokwi-elements` — веб-компоненты, зарегистрированные через `@customElement('wokwi-…')` в `src/*.ts`;
+* `wokwi/wokwi-boards` — платы, по папке на каждую: `boards/<имя>/board.json` — это тип `board-<имя>`.
+
+```bash
+"C:\Program Files\KiCad\10.0\bin\python.exe" tools\update_wokwi_catalog.py
+```
+
+Файл пишется в текущую папку. Скрипт показывает, сколько деталей появилось и исчезло с прошлого
+запуска, и не трогает файл, если ничего не изменилось. Опции: `-o файл`, `--dry-run`, `--force`.
+
+К API GitHub уходит по одному запросу на репозиторий, а сами файлы скачиваются с
+`raw.githubusercontent.com` — это не расходует лимит API. Без токена GitHub даёт 60 запросов API
+в час; переменная окружения `GITHUB_TOKEN` поднимает лимит до 5000. Нужен пакет `requests` — в Python
+из KiCad он уже есть. Если структура репозитория изменится настолько, что детали не найдутся, скрипт
+остановится и не перезапишет каталог.
+
+У Wokwi есть и детали вне этих репозиториев — например, `wokwi-pi-pico` или `wokwi-logic-analyzer`, —
+поэтому каталог не полный список того, что принимает `diagram.json`.
+
 ## Про API KiCad 10
 
 В KiCad 10 SWIG-модуль `pcbnew` объявлен устаревшим в пользу нового IPC API, но всё ещё

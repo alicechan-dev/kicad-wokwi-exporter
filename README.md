@@ -161,6 +161,31 @@ the plugin switches to the built-in parser automatically.
 Options: `--source auto|kicad-cli|schematic`, `--layout grid|schematic`, `-o path\diagram.json`,
 `--mapping path\mapping.json` (defaults to the one next to the script), `--reset-layout`.
 
+## Tool: catalog of Wokwi parts
+
+`tools/update_wokwi_catalog.py` builds `wokwi_catalog.json`, an alphabetical list of the part types
+defined in the public Wokwi repositories:
+
+* `wokwi/wokwi-elements` — web components registered with `@customElement('wokwi-…')` in `src/*.ts`;
+* `wokwi/wokwi-boards` — boards, one folder each: `boards/<name>/board.json` is the `board-<name>` type.
+
+```bash
+"C:\Program Files\KiCad\10.0\bin\python.exe" tools\update_wokwi_catalog.py
+```
+
+The file is written to the current folder. The script prints how many parts are new or gone since
+the previous run and leaves the file untouched if nothing changed. Options: `-o file`, `--dry-run`,
+`--force`.
+
+It makes one GitHub API request per repository and downloads the files themselves from
+`raw.githubusercontent.com`, which doesn't count against the API limit. Without a token GitHub
+allows 60 API requests per hour; set the `GITHUB_TOKEN` environment variable to raise that to 5000.
+It needs `requests`, which KiCad's Python already includes. If a repository's layout changes so much
+that no parts are found, the script stops without overwriting the catalog.
+
+Wokwi also has parts that live outside these repositories, such as `wokwi-pi-pico` or
+`wokwi-logic-analyzer`, so the catalog is not a complete list of what `diagram.json` accepts.
+
 ## About the KiCad 10 API
 
 KiCad 10 deprecates the SWIG `pcbnew` module in favour of the new IPC API, but still ships it
